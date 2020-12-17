@@ -50,8 +50,9 @@ type Statsd struct {
 
 	// Percentiles specifies the percentiles that will be calculated for timing
 	// and histogram stats.
-	Percentiles     []internal.Number
-	PercentileLimit int
+	Percentiles      []internal.Number
+	PercentileLimit  int
+	HistogramBuckets []internal.Number
 
 	DeleteGauges   bool
 	DeleteCounters bool
@@ -777,6 +778,69 @@ func (s *Statsd) aggregate(m metric) {
 		cached.fields[m.field] = field
 		cached.expiresAt = time.Now().Add(time.Duration(s.MaxTTL))
 		s.timings[m.hash] = cached
+
+		for _, bucket := range s.HistogramBuckets {
+			bm := metric{}
+			bm.name = m.name + "_bucket"
+			bm.tags = make(map[string]string)
+			for k, v := range m.tags {
+				bm.tags[k] = v
+			}
+			bm.tags["le"] = strconv.FormatFloat(bucket.Value, 'f', -1, 64)
+			bm.tags["metric_type"] = "counter"
+			bm.hash = strings.Join([]string{m.hash, bm.tags["le"], "bucket"}, "")
+			bm.field = defaultFieldName
+			bm.mtype = "c"
+
+			_, ok := s.counters[bm.hash]
+			if !ok {
+				s.counters[bm.hash] = cachedcounter{
+					name:   bm.name,
+					fields: make(map[string]interface{}),
+					tags:   bm.tags,
+				}
+			}
+			// check if the field exists
+			_, ok = s.counters[bm.hash].fields[bm.field]
+			if !ok {
+				s.counters[bm.hash].fields[bm.field] = int64(0)
+			}
+			if m.floatvalue <= bucket.Value {
+				s.counters[bm.hash].fields[bm.field] =
+					s.counters[bm.hash].fields[bm.field].(int64) + 1
+			}
+
+		}
+		if len(s.HistogramBuckets) > 0 {
+			// Handle +Inf
+			inf := metric{}
+			inf.name = m.name + "_bucket"
+			inf.tags = make(map[string]string)
+			for k, v := range m.tags {
+				inf.tags[k] = v
+			}
+			inf.tags["le"] = "+Inf"
+			inf.tags["metric_type"] = "counter"
+			inf.hash = strings.Join([]string{m.hash, inf.tags["le"], "bucket"}, "")
+			inf.field = defaultFieldName
+			inf.mtype = "c"
+
+			_, ok = s.counters[inf.hash]
+			if !ok {
+				s.counters[inf.hash] = cachedcounter{
+					name:   inf.name,
+					fields: make(map[string]interface{}),
+					tags:   inf.tags,
+				}
+			}
+			// check if the field exists
+			_, ok = s.counters[inf.hash].fields[inf.field]
+			if !ok {
+				s.counters[inf.hash].fields[inf.field] = int64(0)
+			}
+			s.counters[inf.hash].fields[inf.field] =
+				s.counters[inf.hash].fields[inf.field].(int64) + 1
+		}
 	case "c":
 		// check if the measurement exists
 		cached, ok := s.counters[m.hash]
